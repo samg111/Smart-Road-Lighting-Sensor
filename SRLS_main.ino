@@ -254,3 +254,5 @@ void loop() {
     ledcAnalogWrite(LED_PIN, (int)currentBrightness);
   }
 }
+
+// Adding comment to test Git Committing
