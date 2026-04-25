@@ -1,15 +1,16 @@
 #include <Wire.h>
-#include <Adafruit_Sensor.h>
-#include <Adafruit_TSL2591.h>
 #include <HardwareSerial.h>
+#include "Adafruit_Sensor.h"
+#include "Adafruit_TSL2591.h"
+#include "WS_DALI.h"
 
 /* =========================================================================
    HARDWARE PIN CONFIGURATION
    ========================================================================= */
-#define LED_PIN          14   // PWM Output
-#define RADAR_RX_PIN     17   // ESP32 RX (Connect to Sensor TX)
-#define RADAR_TX_PIN     16   // ESP32 TX (Connect to Sensor RX)
-#define I2C_SDA          21   // TSL2591 SDA
+//#define LED_PIN          14   // PWM Output
+#define RADAR_RX_PIN     16   // ESP32 RX (Connect to Sensor TX)
+#define RADAR_TX_PIN     17   // ESP32 TX (Connect to Sensor RX)
+#define I2C_SDA          23   // TSL2591 SDA
 #define I2C_SCL          22   // TSL2591 SCL
 
 /* =========================================================================
@@ -32,9 +33,13 @@ float smoothedLux = 0.0;
 unsigned long lastMotionTime = 0; 
 bool motionActive = false;
 
-// Brightness State (Float for smooth fading)
-float currentBrightness = 0.0; // Where the LED IS right now
-int targetBrightness = 0;      // Where the LED WANTS to be
+// LED Brightness State (Float for smooth fading) (OLD)
+//float currentBrightness = 0.0; // Where the LED IS right now
+//int targetBrightness = 0;      // Where the LED WANTS to be
+
+// DALI Brightness State (0 to 100%)
+int targetBrightness = 0;      
+int lastTargetBrightness = -1; // Tracks previous state to prevent bus flooding
 
 // Radar Data
 float lastSpeedMps = 0.0; 
@@ -51,11 +56,13 @@ unsigned long lastFadeTime = 0;  // For Animation (20ms)
    HELPER FUNCTIONS
    ========================================================================= */
 
-// Map 0-255 input to 12-bit (0-4095) duty cycle
+/*
+// Map 0-255 input to 12-bit (0-4095) duty cycle (OLD)
 void ledcAnalogWrite(uint8_t pin, uint32_t value, uint32_t valueMax = 255) {
   uint32_t duty = (4095 / valueMax) * min(value, valueMax);
   ledcWrite(pin, duty);
 }
+*/
 
 void printStatus(long timeSince, int ambientTarget, String source) {
   // Lux
@@ -79,12 +86,21 @@ void printStatus(long timeSince, int ambientTarget, String source) {
   }
   Serial.print("\t");
 
-  // Output
+/*
+  // Output for LED (OLD)
   Serial.print("| LED: ");
   Serial.print((int)currentBrightness); // Show ACTUAL brightness
   Serial.print("/");
   Serial.print(targetBrightness);      // Show TARGET brightness
   Serial.print(" [");
+  Serial.print(source);
+  Serial.println("]");
+*/
+
+  // Output
+  Serial.print("| DALI Target: ");
+  Serial.print(target);      
+  Serial.print("% [");
   Serial.print(source);
   Serial.println("]");
 }
@@ -131,7 +147,7 @@ void setup() {
   delay(2000);
 
   // 2. Setup PWM (12-bit)
-  ledcAttach(LED_PIN, 5000, 12);
+  //ledcAttach(LED_PIN, 5000, 12);
 
   // 3. Setup Radar
   RadarSerial.begin(115200, SERIAL_8N1, RADAR_RX_PIN, RADAR_TX_PIN);
@@ -144,7 +160,7 @@ void setup() {
   while (millis() - startTime < 3000) {
     if (RadarSerial.available()) {
       radarFound = true;
-      break; // We heard something, break out of the loop early
+      break; // Heard something, break out of the loop early
     }
   }
 
@@ -175,7 +191,12 @@ void setup() {
   if(event.light) smoothedLux = event.light;
 
   // Initialize Motion Timer to "Expired"
-  lastMotionTime = -MOTION_HOLD_TIME; 
+  lastMotionTime = -MOTION_HOLD_TIME;
+
+  // 6. Setup DALI Subsystem
+  Serial.println("Initializing DALI Bus...");
+  DALI_Init();
+  Serial.printf("DALI Scan Complete. Found %d devices.\n", DALI_NUM);
 
   Serial.println("--- SYSTEM ONLINE ---");
 }
@@ -217,7 +238,7 @@ void loop() {
     } 
     else {
       if (motionActive) {
-         targetBrightness = 255;
+         targetBrightness = 100;
          decisionSource = "NIGHT (MOTION)";
       } else {
          targetBrightness = 0;
@@ -228,10 +249,23 @@ void loop() {
       }
     }
 
-    // --- D. DASHBOARD ---
+    // --- D. DALI TRANSMISSION (Only on state change) ---
+    if (targetBrightness != lastTargetBrightness) {
+      lastTargetBrightness = targetBrightness;
+      
+      // Loop through all discovered DALI addresses and send the new target
+      if (DALI_NUM > 0) {
+        for (int i = 0; i < DALI_NUM; i++) {
+          Luminaire_Brightness(targetBrightness, DALI_Addr[i]);
+        }
+      }
+    }
+
+    // --- E. DASHBOARD ---
     printStatus(timeSinceMotion, targetBrightness, decisionSource);
   }
 
+  /*
   // 3. FADE ANIMATION (Runs every 20ms for smooth 50fps look)
   if (millis() - lastFadeTime > 20) {
     lastFadeTime = millis();
@@ -253,6 +287,5 @@ void loop() {
     // Write to Hardware
     ledcAnalogWrite(LED_PIN, (int)currentBrightness);
   }
+  */
 }
-
-// Adding comment to test Git Committing
