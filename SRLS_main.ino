@@ -1,5 +1,7 @@
 #include <Wire.h>
 #include <HardwareSerial.h>
+#include <WiFi.h>
+#include <esp_now.h>
 #include "Adafruit_Sensor.h"
 #include "Adafruit_TSL2591.h"
 #include "WS_DALI.h"
@@ -32,6 +34,9 @@ Adafruit_TSL2591 tsl = Adafruit_TSL2591(2591);
 #define ShowSerial Serial  
 BGT24LTR11<HardwareSerial> BGT;
 
+// ESP-NOW Broadcast Address
+uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
 // System State
 float smoothedLux = 0.0;          
 unsigned long lastMotionTime = 0; 
@@ -53,30 +58,24 @@ unsigned long lastLogicTime = 0; // For Sensors (200ms)
    ========================================================================= */
 
 void printStatus(long timeSince, int ambientTarget, String source) {
-  ShowSerial.print("Lux: "); 
-  ShowSerial.print(smoothedLux, 1);
-  ShowSerial.print("\t");
+  // Construct a single payload string for both Serial and ESP-NOW
+  String payload = "Lux: " + String(smoothedLux, 1) + "\t| Motion: ";
 
-  ShowSerial.print("| Motion: ");
   if (motionActive) {
-    ShowSerial.print(lastDirection);
-    ShowSerial.print(" @ ");
-    ShowSerial.print(lastSpeedMps, 2); 
-    ShowSerial.print(" m/s (Hold: ");
     long remaining = (MOTION_HOLD_TIME - timeSince) / 1000;
     if (remaining < 0) remaining = 0;
-    ShowSerial.print(remaining);
-    ShowSerial.print("s)");
+    payload += lastDirection + " @ " + String(lastSpeedMps, 2) + " m/s (Hold: " + String(remaining) + "s)\t";
   } else {
-    ShowSerial.print("Scanning...                          ");
+    payload += "Scanning...                          \t";
   }
-  ShowSerial.print("\t");
 
-  ShowSerial.print("| DALI Target: ");
-  ShowSerial.print(ambientTarget);
-  ShowSerial.print("% [");
-  ShowSerial.print(source);
-  ShowSerial.println("]");
+  payload += "| DALI Target: " + String(ambientTarget) + "% [" + source + "]";
+
+  // 1. Print locally
+  ShowSerial.println(payload);
+
+  // 2. Transmit via ESP-NOW
+  esp_now_send(broadcastAddress, (uint8_t *)payload.c_str(), payload.length());
 }
 
 /* =========================================================================
@@ -87,6 +86,24 @@ void setup() {
   ShowSerial.begin(115200);
   delay(2000);
   ShowSerial.println("\n--- SMART STREETLIGHT SYSTEM INITIALISING ---");
+
+  // --- ESP-NOW INITIALIZATION ---
+  WiFi.mode(WIFI_STA); // Set device as a Wi-Fi Station
+  if (esp_now_init() != ESP_OK) {
+    ShowSerial.println("ESP-NOW Init Failed");
+  } else {
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+    peerInfo.channel = 0;  
+    peerInfo.encrypt = false;
+    peerInfo.ifidx = WIFI_IF_STA; 
+    
+    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+      ShowSerial.println("Failed to add ESP-NOW peer");
+    } else {
+      ShowSerial.println("ESP-NOW initialized for broadcast.");
+    }
+  }
 
   // 1. Setup DALI Subsystem
   ShowSerial.println("Initializing DALI Bus...");
