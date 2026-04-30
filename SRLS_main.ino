@@ -3,216 +3,163 @@
 #include "Adafruit_Sensor.h"
 #include "Adafruit_TSL2591.h"
 #include "WS_DALI.h"
+#include "BGT24LTR11.h"
 
 /* =========================================================================
    HARDWARE PIN CONFIGURATION
    ========================================================================= */
-//#define LED_PIN          14   // PWM Output
-#define RADAR_RX_PIN     16   // ESP32 RX (Connect to Sensor TX)
-#define RADAR_TX_PIN     17   // ESP32 TX (Connect to Sensor RX)
+
 #define I2C_SDA          23   // TSL2591 SDA
 #define I2C_SCL          22   // TSL2591 SCL
 
 /* =========================================================================
    SYSTEM TUNING PARAMETERS
    ========================================================================= */
-const float LUX_DARK   = 5.0;     // Lux level for 100% Brightness
-const float LUX_BRIGHT = 50.0;   // Lux level for 0% Brightness
-const float SMOOTHING_FACTOR = 0.1; 
-const unsigned long MOTION_HOLD_TIME = 5000; // 5 Seconds Hold
-const unsigned long FADE_DURATION_MS = 510; // Time to fade from 0 to 100% (0.51 Seconds)
+
+const float LUX_BRIGHT = 50.0;  // The lux level for daytime (i.e. when the luminaire should be off)
+const float ABSOLUTE_LUX_BRIGHT = 500.0;  // The lux level that overrides the radar to force daytime conditions
+const float SMOOTHING_FACTOR = 0.1; // Smoothing factor so that lux levels don't change too rapidly
+const unsigned long MOTION_HOLD_TIME = 5000;  // Time in ms that the luminaire stays at max brightness when motion is detected
 
 /* =========================================================================
    GLOBAL VARIABLES
    ========================================================================= */
+
 Adafruit_TSL2591 tsl = Adafruit_TSL2591(2591);
-HardwareSerial RadarSerial(1);
+
+// Setup the Radar objects according to the ESP32-C6 architecture
+#define COMSerial Serial0  
+#define ShowSerial Serial  
+BGT24LTR11<HardwareSerial> BGT;
 
 // System State
 float smoothedLux = 0.0;          
 unsigned long lastMotionTime = 0; 
 bool motionActive = false;
 
-// LED Brightness State (Float for smooth fading) (OLD)
-//float currentBrightness = 0.0; // Where the LED IS right now
-//int targetBrightness = 0;      // Where the LED WANTS to be
-
 // DALI Brightness State (0 to 100%)
 int targetBrightness = 0;      
-int lastTargetBrightness = -1; // Tracks previous state to prevent bus flooding
+int lastTargetBrightness = -1; 
 
 // Radar Data
 float lastSpeedMps = 0.0; 
 String lastDirection = "None";
-byte buffer[20];
-int bufIndex = 0;
-bool parsing = false;
 
 // Timing
 unsigned long lastLogicTime = 0; // For Sensors (200ms)
-unsigned long lastFadeTime = 0;  // For Animation (20ms)
 
 /* =========================================================================
    HELPER FUNCTIONS
    ========================================================================= */
 
-/*
-// Map 0-255 input to 12-bit (0-4095) duty cycle (OLD)
-void ledcAnalogWrite(uint8_t pin, uint32_t value, uint32_t valueMax = 255) {
-  uint32_t duty = (4095 / valueMax) * min(value, valueMax);
-  ledcWrite(pin, duty);
-}
-*/
-
 void printStatus(long timeSince, int ambientTarget, String source) {
-  // Lux
-  Serial.print("Lux: "); 
-  Serial.print(smoothedLux, 1);
-  Serial.print("\t");
+  ShowSerial.print("Lux: "); 
+  ShowSerial.print(smoothedLux, 1);
+  ShowSerial.print("\t");
 
-  // Motion
-  Serial.print("| Motion: ");
+  ShowSerial.print("| Motion: ");
   if (motionActive) {
-    Serial.print(lastDirection);
-    Serial.print(" @ ");
-    Serial.print(lastSpeedMps, 2); 
-    Serial.print(" m/s (Hold: ");
+    ShowSerial.print(lastDirection);
+    ShowSerial.print(" @ ");
+    ShowSerial.print(lastSpeedMps, 2); 
+    ShowSerial.print(" m/s (Hold: ");
     long remaining = (MOTION_HOLD_TIME - timeSince) / 1000;
     if (remaining < 0) remaining = 0;
-    Serial.print(remaining);
-    Serial.print("s)");
+    ShowSerial.print(remaining);
+    ShowSerial.print("s)");
   } else {
-    Serial.print("Scanning...");
+    ShowSerial.print("Scanning...                          ");
   }
-  Serial.print("\t");
+  ShowSerial.print("\t");
 
-/*
-  // Output for LED (OLD)
-  Serial.print("| LED: ");
-  Serial.print((int)currentBrightness); // Show ACTUAL brightness
-  Serial.print("/");
-  Serial.print(targetBrightness);      // Show TARGET brightness
-  Serial.print(" [");
-  Serial.print(source);
-  Serial.println("]");
-*/
-
-  // Output
-  Serial.print("| DALI Target: ");
-  Serial.print(target);      
-  Serial.print("% [");
-  Serial.print(source);
-  Serial.println("]");
-}
-
-void readRadarData() {
-  while (RadarSerial.available()) {
-    byte inByte = RadarSerial.read();
-
-    if (!parsing) {
-      if (bufIndex == 0 && inByte == 0x55) buffer[bufIndex++] = inByte;
-      else if (bufIndex == 1 && inByte == 0xA2) { buffer[bufIndex++] = inByte; parsing = true; }
-      else bufIndex = 0;
-      continue; 
-    }
-
-    if (parsing) {
-      buffer[bufIndex++] = inByte;
-      if (bufIndex >= 10) {
-        if (buffer[2] == 0xC1) {
-           byte state = buffer[7]; 
-           if (state == 0x01 || state == 0x02) {
-             uint16_t speedCmps = (buffer[5] << 8) | buffer[6];
-             lastSpeedMps = speedCmps / 100.0; 
-             lastDirection = (state == 0x01) ? "Leaving    " : "Approaching";
-             lastMotionTime = millis(); 
-           }
-        }
-        bufIndex = 0;
-        parsing = false;
-      }
-    }
-  }
+  ShowSerial.print("| DALI Target: ");
+  ShowSerial.print(ambientTarget);
+  ShowSerial.print("% [");
+  ShowSerial.print(source);
+  ShowSerial.println("]");
 }
 
 /* =========================================================================
    SETUP
    ========================================================================= */
+
 void setup() {
-  Serial.begin(115200);
-  Serial.println("\n--- SMART STREETLIGHT SYSTEM INITIALISING ---");
-  
-  // 1. Give sensors time to power up cleanly
-  Serial.println("Looking for sensors...");
+  ShowSerial.begin(115200);
+  delay(2000);
+  ShowSerial.println("\n--- SMART STREETLIGHT SYSTEM INITIALISING ---");
+
+  // 1. Setup DALI Subsystem
+  ShowSerial.println("Initializing DALI Bus...");
+  DALI_Init();
+  if (DALI_NUM > 0) {
+    ShowSerial.println("DALI scan complete");
+  }
+  else {
+    ShowSerial.println("DALI scan failed! Restarting...");
+    setup();
+  }
+  ShowSerial.println("Looking for sensors...");
   delay(2000);
 
-  // 2. Setup PWM (12-bit)
-  //ledcAttach(LED_PIN, 5000, 12);
-
-  // 3. Setup Radar
-  RadarSerial.begin(115200, SERIAL_8N1, RADAR_RX_PIN, RADAR_TX_PIN);
+  // 2. Setup Doppler Radar using the Library
+  COMSerial.begin(115200);
+  BGT.init(COMSerial);
   
-  // 4. Radar Hardware Check
-  bool radarFound = false;
-  unsigned long startTime = millis();
-  
-  // Listen silently for up to 3 seconds
-  while (millis() - startTime < 3000) {
-    if (RadarSerial.available()) {
-      radarFound = true;
-      break; // Heard something, break out of the loop early
-    }
+  // Set to Target Detection Mode (0). Loop until successful.
+  int retries = 0;
+  while (!BGT.setMode(0) && retries < 5) {
+    delay(500);
+    retries++;
   }
-
-  // Print the result ONCE after the loop finishes
-  if (radarFound) {
-    Serial.println("Doppler radar connected");
-    // Clear out any half-messages from the startup sequence
-    while(RadarSerial.available()) RadarSerial.read();
+  if (retries < 5) {
+    ShowSerial.println("Doppler radar connected");
   } else {
-    Serial.println("ERROR: Doppler Radar not found!");
+    ShowSerial.println("ERROR: doppler radar not found!");
+    while (1);
   }
-  
-  // 5. Setup Light Sensor
+
+  // 3. Setup Light Sensor
   Wire.begin(I2C_SDA, I2C_SCL);
   if (tsl.begin()) {
-    Serial.println("Light sensor connected");
+    ShowSerial.println("Light sensor connected");
   } else {
-    Serial.println("ERROR: light sensor not found!");
+    ShowSerial.println("ERROR: light sensor not found!");
     while (1);
   }
   
   tsl.setGain(TSL2591_GAIN_MED);
   tsl.setTiming(TSL2591_INTEGRATIONTIME_100MS);
-
-  // Pre-load smoothing
   sensors_event_t event;
   tsl.getEvent(&event);
   if(event.light) smoothedLux = event.light;
-
-  // Initialize Motion Timer to "Expired"
   lastMotionTime = -MOTION_HOLD_TIME;
 
-  // 6. Setup DALI Subsystem
-  Serial.println("Initializing DALI Bus...");
-  DALI_Init();
-  Serial.printf("DALI Scan Complete. Found %d devices.\n", DALI_NUM);
-
-  Serial.println("--- SYSTEM ONLINE ---");
+  ShowSerial.println("--- SYSTEM ONLINE ---");
 }
 
 /* =========================================================================
    MAIN LOOP
    ========================================================================= */
-void loop() {
-  // 1. READ RADAR (Constant)
-  readRadarData();
 
-  // 2. SENSOR LOGIC (Runs every 200ms)
+void loop() {
+  // SENSOR LOGIC (Runs every 200ms)
   if (millis() - lastLogicTime > 200) {
     lastLogicTime = millis();
 
-    // --- A. READ LIGHT ---
+    // --- A. READ RADAR VIA LIBRARY ---
+    uint16_t radarState = 0;
+    uint16_t radarSpeed = 0;
+    
+    // getInfo() queries the sensor and returns 1 if valid data is received
+    if (BGT.getInfo(&radarState, &radarSpeed)) {
+        if (radarState == BGT24LTR11_TARGET_APPROACH || radarState == BGT24LTR11_TARGET_LEAVE) {
+            lastSpeedMps = radarSpeed / 100.0; // Convert cm/s to m/s
+            lastDirection = (radarState == BGT24LTR11_TARGET_LEAVE) ? "Leaving    " : "Approaching";
+            lastMotionTime = millis(); 
+        }
+    }
+
+    // --- B. READ LUX LEVEL ---
     sensors_event_t event;
     tsl.getEvent(&event);
     float currentLux = event.light;
@@ -221,15 +168,24 @@ void loop() {
        smoothedLux = (smoothedLux * (1.0 - SMOOTHING_FACTOR)) + (currentLux * SMOOTHING_FACTOR);
     }
 
-    // --- B. CHECK CONDITIONS ---
-    // Is it Daytime?
-    bool isDaytime = (smoothedLux >= LUX_BRIGHT);
-    
-    // Is there Motion?
+    // --- C. CHECK CONDITIONS ---
+    static bool isDaytime = false;
+    // Hysteresis: Prevent the luminaire from blinding its own sensor
+    if (targetBrightness == 0) {
+        // If the light is off, trust the sensor normally
+        isDaytime = (smoothedLux >= LUX_BRIGHT);
+    } else {
+        // If the light is ON, it is probably illuminating the sensor
+        // Only force daytime if lux is very high
+        if (smoothedLux >= ABSOLUTE_LUX_BRIGHT) {
+            isDaytime = true;
+        }
+    }
+
     long timeSinceMotion = millis() - lastMotionTime;
     motionActive = (timeSinceMotion < MOTION_HOLD_TIME);
 
-    // --- C. DECIDE TARGET ---
+    // --- D. DECIDE TARGET ---
     String decisionSource = "";
 
     if (isDaytime) {
@@ -240,20 +196,30 @@ void loop() {
       if (motionActive) {
          targetBrightness = 100;
          decisionSource = "NIGHT (MOTION)";
-      } else {
-         targetBrightness = 0;
-         decisionSource = "NIGHT (SAVING)";
-         // Cleanup display
-         lastSpeedMps = 0.0;
-         lastDirection = "None";
+      }
+      else {
+        if (targetBrightness > 0) {
+          targetBrightness -= 2;  // Dim by 2% every 200ms (Takes 10 seconds to reach 0)
+
+          if (targetBrightness < 0) {
+            targetBrightness = 0; // Prevent brightess from dropping below 0
+          }
+          decisionSource = "NIGHT (FADING)";
+        }
+        else {
+          // Once fade reaches 0, enter saving mode
+          targetBrightness = 0;
+          decisionSource = "NIGHT (SAVING)";
+          lastSpeedMps = 0.0;
+          lastDirection = "None";
+        }
       }
     }
 
-    // --- D. DALI TRANSMISSION (Only on state change) ---
+    // --- E. DALI TRANSMISSION (Only on state change) ---
     if (targetBrightness != lastTargetBrightness) {
       lastTargetBrightness = targetBrightness;
       
-      // Loop through all discovered DALI addresses and send the new target
       if (DALI_NUM > 0) {
         for (int i = 0; i < DALI_NUM; i++) {
           Luminaire_Brightness(targetBrightness, DALI_Addr[i]);
@@ -261,31 +227,8 @@ void loop() {
       }
     }
 
-    // --- E. DASHBOARD ---
+    // --- F. PRINT TO DASHBOARD ---
     printStatus(timeSinceMotion, targetBrightness, decisionSource);
   }
-
-  /*
-  // 3. FADE ANIMATION (Runs every 20ms for smooth 50fps look)
-  if (millis() - lastFadeTime > 20) {
-    lastFadeTime = millis();
-
-    // Calculate Step Size: Full Range (255) / (Duration / LoopTime)
-    // E.g. 255 / (510ms / 20ms) = 10 steps per loop
-    float step = 255.0 / (FADE_DURATION_MS / 20.0);
-    
-    // Move Current towards Target
-    if (currentBrightness < targetBrightness) {
-      currentBrightness += step;
-      if (currentBrightness > targetBrightness) currentBrightness = targetBrightness;
-    }
-    else if (currentBrightness > targetBrightness) {
-      currentBrightness -= step;
-      if (currentBrightness < targetBrightness) currentBrightness = targetBrightness;
-    }
-
-    // Write to Hardware
-    ledcAnalogWrite(LED_PIN, (int)currentBrightness);
-  }
-  */
+  delay(2);
 }
