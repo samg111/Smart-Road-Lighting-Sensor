@@ -2,7 +2,7 @@
 #include <Arduino.h>
 #include "DALI_Lib.h"
 
-#define TX_PIN 9
+#define TX_PIN 14
 #define RX_PIN 5
 
 extern uint8_t DALI_Addr[64];

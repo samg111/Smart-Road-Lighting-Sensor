@@ -47,7 +47,7 @@ void Blinking_ALL() {
   delay(500);
 }
 void Luminaire_Brightness(uint8_t Light, uint8_t addr) {                     
-  printf("Running: Set the brightness of the fixture at address %d to %d %%\r\n", addr, Light);
+  // printf("Running: Set the brightness of the fixture at address %d to %d %%\r\n", addr, Light);
   uint8_t Light_practical = (uint8_t)(2.55*Light);
   dali.set_level(Light_practical,addr);
 }
